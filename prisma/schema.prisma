@@ -1,0 +1,74 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// One row per (lastfmUsername, year). Doubles as the async-job record for the
+// chunked ingestion ("step") process and as the cache for the finished stats,
+// so the dashboard can be served straight from here on repeat visits.
+model StatsJob {
+  id       String @id @default(cuid())
+  username String
+  year     Int
+
+  // Captured once from user.getInfo when the job is first created.
+  displayName      String?
+  profileImageUrl  String?
+  libraryPlaycount Int?
+
+  // pending -> processing -> done | error
+  status String @default("pending")
+
+  // Fixed window for this job, snapshotted at creation so paginating across
+  // multiple steps doesn't drift as "now" moves forward.
+  fromUts Int
+  toUts   Int
+
+  // Pagination cursor into Last.fm's user.getRecentTracks (200/page).
+  page       Int  @default(0)
+  totalPages Int?
+
+  // Running aggregation accumulator while status = "processing".
+  partial Json?
+
+  // Finished, display-ready stats payload once status = "done".
+  result Json?
+  error  String?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  lastRequestedAt DateTime @default(now())
+
+  // Secondary, best-effort enrichment pass that runs once the main scrobble
+  // fetch is "done": album art, genre tags, track durations, and per-artist
+  // all-time playcounts. Kept separate from `status`/`result` above so the
+  // primary dashboard never blocks on it — see src/lib/enrich.ts.
+  enrichStatus  String  @default("pending") // pending -> processing -> done | error
+  enrichStep    Int     @default(0) // cursor into the deterministic task list (see buildEnrichmentTasks)
+  enrichPartial Json? // running accumulator while enrichStatus = "processing"
+  enrichment    Json? // finished payload once enrichStatus = "done"
+  enrichError   String?
+
+  @@unique([username, year])
+}
+
+// Global, non-user-specific Last.fm lookups (album art, track art+duration,
+// artist genre tags) cached across every user/year so a popular artist or
+// album is only ever fetched from Last.fm once.
+model MediaCache {
+  kind      String // "albumArt" | "trackInfo" | "artistTags"
+  key       String // normalized lookup key, e.g. "artist|||album"
+  data      Json
+  updatedAt DateTime @updatedAt
+
+  @@id([kind, key])
+}
